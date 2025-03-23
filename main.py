@@ -1,139 +1,40 @@
+from waitress import serve
 import json
-from flask import Flask, request, jsonify
+import socket
+from flask import Flask, jsonify
 from flask_cors import CORS
+from get_data import fetch_stock_data  # Import the function to fetch stock data
+from prediction import prediction
+from market_news import get_news_sentiment
+from utilities_ai_insights import calculate_log_returns, calculate_sharpe_ratio, generate_insights, allocate_funds
 
-def prediction(prices, ticker):
-    """
-    Predict the next day's price based on the last 7 days.
-    This is a simple placeholder implementation.
-    """
-
-    # Simple prediction - average of last 3 days with a slight upward trend
-    return round(sum(prices[-3:]) / 3 * 1.01, 2)
-
-def get_news_sentiment(company_name):
-    """
-    Get market sentiment for a given company.
-    This is a placeholder implementation.
-    """
-    # Placeholder sentiment data
-    sentiments = {
-        "ethereum": ("Bullish (Positive)", {"positive": 15, "neutral": 10, "negative": 5}),
-        "amazon": ("Neutral", {"positive": 12, "neutral": 15, "negative": 8}),
-        "google": ("Bullish (Positive)", {"positive": 18, "neutral": 12, "negative": 4}),
-        "tesla": ("Bearish (Negative)", {"positive": 10, "neutral": 8, "negative": 15})
-    }
-    
-    return sentiments.get(company_name, ("Neutral", {"positive": 0, "neutral": 0, "negative": 0}))
-
-def calculate_log_returns(prices):
-    """
-    Calculate log returns for a series of prices.
-    """
-    import math
-    returns = []
-    for i in range(1, len(prices)):
-        returns.append(math.log(prices[i] / prices[i-1]))
-    return returns
-
-def calculate_sharpe_ratio(returns, risk_free_rate=0.01/252):
-    """
-    Calculate the Sharpe ratio for a series of returns.
-    """
-    if not returns:
-        return 0
-    
-    import math
-    import statistics
-    
-    # Compute average daily return
-    avg_return = sum(returns) / len(returns)
-    
-    # Compute daily standard deviation
-    if len(returns) <= 1:
-        return 0
-    
-    std_dev = statistics.stdev(returns) if len(returns) > 1 else 0.01
-    
-    # Avoid division by zero
-    if std_dev == 0:
-        std_dev = 0.01
-    
-    # Annualize (approximately 252 trading days in a year)
-    sharpe_ratio = (avg_return - risk_free_rate) / std_dev * math.sqrt(252)
-    
-    return sharpe_ratio
-
-def generate_insights(sharpe_ratio):
-    """
-    Generate investment insights based on Sharpe ratio.
-    """
-    if sharpe_ratio > 1.5:
-        return "Excellent risk-adjusted returns. Strong buy signal."
-    elif sharpe_ratio > 1:
-        return "Good risk-adjusted returns. Consider buying."
-    elif sharpe_ratio > 0.5:
-        return "Moderate risk-adjusted returns. Hold if already invested."
-    elif sharpe_ratio > 0:
-        return "Low risk-adjusted returns. Consider selling."
-    else:
-        return "Negative risk-adjusted returns. Strong sell signal."
-
-def allocate_funds(stock_data, total_investment):
-    """
-    Allocate funds based on Sharpe ratios.
-    """
-    # Get positive Sharpe ratios
-    positive_sharpe = [max(0.01, s["sharpe_ratio"]) for s in stock_data]
-    total_sharpe = sum(positive_sharpe)
-    
-    # Calculate allocations
-    if total_sharpe == 0:
-        allocations = [total_investment / len(stock_data)] * len(stock_data)
-    else:
-        allocations = [round((s / total_sharpe) * total_investment, 2) for s in positive_sharpe]
-    
-    return allocations
+app = Flask(__name__)
+CORS(app)
 
 def analyze_stocks(stock_prices, total_investment=10000):
-    """
-    Analyzes multiple stocks and returns structured JSON output.
-    :param stock_prices: Dictionary with ticker symbols as keys and last 7 days' prices as values.
-    :param total_investment: Total capital to allocate.
-    :return: Dictionary containing all stock insights.
-    """
-    # Mapping tickers to company names for news analysis
     stocks = {
         "ETH": "ethereum",
         "AMZN": "amazon",
         "GOOG": "google",
         "TSLA": "tesla"
     }
-    stock_data = []  # List to store computed data for each stock
-    # Process each stock individually
+
+    stock_data = []
     for ticker, company_name in stocks.items():
         last_7_prices = stock_prices.get(ticker, [])
         if len(last_7_prices) != 7:
             return {"error": f"Invalid data for {ticker}. Expected 7 price values."}
-        # Predict the next day's price
+
         predicted_price = prediction(last_7_prices, ticker)
-        # Get market sentiment & sentiment breakdown
         market_sentiment, sentiment_counts = get_news_sentiment(company_name)
-        # Calculate Sharpe Ratio & generate insights
         log_returns = calculate_log_returns(last_7_prices)
         sharpe_ratio = calculate_sharpe_ratio(log_returns)
         insight = generate_insights(sharpe_ratio)
-        # Determine decision (Buy, Hold, Sell) using both sentiment & Sharpe Ratio
-        if sharpe_ratio > 1 and market_sentiment == "Bullish (Positive)":
-            decision = "BUY"
-            confidence = "High"
-        elif 0.5 <= sharpe_ratio <= 1 and market_sentiment in ["Bullish (Positive)", "Neutral"]:
-            decision = "HOLD"
-            confidence = "Medium"
-        else:
-            decision = "SELL"
-            confidence = "Low"
-        # Append the computed data for each stock
+
+        decision = "BUY" if sharpe_ratio > 1 and market_sentiment == "Bullish (Positive)" else \
+                   "HOLD" if 0.5 <= sharpe_ratio <= 1 and market_sentiment in ["Bullish (Positive)", "Neutral"] else "SELL"
+        confidence = "High" if decision == "BUY" else "Medium" if decision == "HOLD" else "Low"
+
         stock_data.append({
             "ticker": ticker,
             "company_name": company_name,
@@ -147,67 +48,44 @@ def analyze_stocks(stock_prices, total_investment=10000):
             "sharpe_ratio": sharpe_ratio,
             "insight": insight
         })
-    # Allocate funds based on Sharpe Ratios
-    allocations = allocate_funds(stock_data, total_investment)
-    # Construct final JSON output for each company
+    
+    allocations, _ = allocate_funds(stock_data, total_investment)
     results = {}
     for i, sd in enumerate(stock_data):
         results[sd["company_name"]] = {
-            "Decision": sd["decision"],
-            "market_analysis": {
-                "Market Sentiment": f"{sd['market_sentiment']}, Count: {sd['sentiment_counts']}, Insight: {sd['insight']}",
-                "Sharpe Ratio": round(sd["sharpe_ratio"], 2)
+            "CompanyName": sd["company_name"],
+            "InvestmentDecision": sd["decision"],
+            "MarketAnalysis": {
+                "Sentiment": f"{sd['market_sentiment']}, Insight: {sd['insight']}",
+                "SharpeRatio": round(sd["sharpe_ratio"], 2)
             },
-            "Confidence": sd["confidence"],
-            "Predicted Price": sd["predicted_price"],
-            "Allocation": f"${allocations[i]}"
+            "ConfidenceLevel": sd["confidence"],
+            "NextDayPredictedPrice": sd["predicted_price"],
+            "AllocatedFunds": f"${allocations[i]}"
         }
     return results
 
-# Create Flask app
-app = Flask(__name__)
-CORS(app)
-@app.route('/analyze', methods=['POST'])
+
+@app.route('/analyze', methods=['GET'])
 def analyze():
     try:
-        data = request.get_json()
-        
-        if not data or 'stock_prices' not in data:
-            return jsonify({"error": "Missing stock_prices in request body"}), 400
-        
-        stock_prices = data['stock_prices']
-        total_investment = data.get('total_investment', 10000)
-        
-        results = analyze_stocks(stock_prices, total_investment)
-        return jsonify(results)
-    
+        stock_prices = fetch_stock_data()
+        result = analyze_stocks(stock_prices)
+        return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "healthy"}), 200
+
 @app.route('/', methods=['GET'])
 def home():
     return '''
     <h1>Stock Analysis API</h1>
-    <p>Send a POST request to /analyze with stock price data to get investment recommendations.</p>
-    <h2>Example Request:</h2>
-    <pre>
-    {
-        "stock_prices": {
-            "ETH": [3100, 3150, 3200, 3180, 3195, 3210, 3225],
-            "AMZN": [3500, 3550, 3570, 3560, 3580, 3595, 3610],
-            "GOOG": [2800, 2825, 2850, 2835, 2845, 2860, 2875],
-            "TSLA": [700, 715, 720, 710, 725, 730, 740]
-        },
-        "total_investment": 10000
-    }
+    <p>Send a get request to /analyze with stock price data to get investment recommendations.</p>
     </pre>
-    
     '''
-
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
-
-use fast api instead of flask
+host = "0.0.0.0"
+port = 5000
+app.run(debug=True, host='0.0.0.0', port=5000)
+local_ip = socket.gethostbyname(socket.gethostname())
+print(f"Server running on: http://{local_ip}:{port}")
+serve(app, host=host, port=port)
